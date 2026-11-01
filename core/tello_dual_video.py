@@ -30,6 +30,7 @@ for _p in (DD_ROOT / "core", DD_ROOT / "tools"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+from obstacles import ObstacleDetector
 from tello_dongle_setup import load_fleet, present_fleet
 from tello_tags import TAG_SIZE_M as WORLD_TAG_SIZE_M
 from tello_tags import camera_in_tag, load_map, origin_in_camera
@@ -41,6 +42,7 @@ from tello_policy import (
     LOCK_VERTICAL,
     SEARCH_CEILING_M,
     apply_yaw,
+    avoid_rc,
     cam_in_tag,
     make_controllers,
     predict_odom,
@@ -325,7 +327,7 @@ def _yaw_delta(prev, yaw):
     return delta
 
 
-def run_drone(name, iface, cmd, video, state, local_port, frames, poses, heights, batteries, motion, modes, estimates, stats, stop, takeoff_lock, flight, names, ready, play):
+def run_drone(name, iface, cmd, video, state, local_port, frames, poses, heights, batteries, motion, modes, estimates, stats, stop, takeoff_lock, flight, names, ready, play, obstacles):
     threading.Thread(target=forward, args=(video, local_port, stop), daemon=True).start()
     link = {"t": 0.0}  # wall-clock of the last state packet; our passive link signal
     threading.Thread(
@@ -515,6 +517,9 @@ def run_drone(name, iface, cmd, video, state, local_port, frames, poses, heights
                 pid.reset()
         else:
             search_since = None
+        sticks, mode = avoid_rc(sticks, mode, obstacles.get(name), now)
+        if mode == "avoid" and last_mode != "avoid":
+            print(f"{name} obstacle {obstacles[name]['rate']}", flush=True)
         if cam is not None:
             estimates[name] = {
                 "range_m": round(float(np.linalg.norm(cam)), 2),
@@ -629,10 +634,11 @@ def run_drone(name, iface, cmd, video, state, local_port, frames, poses, heights
         stop.wait(0.05)  # ~20 Hz steady rc stream (no blocking keepalive)
 
 
-def watch_pose(name, frames, poses, stats, stop):
+def watch_pose(name, frames, poses, stats, stop, obstacles):
     from pupil_apriltags import Detector
 
     det = Detector(families="tag36h11", nthreads=2, quad_decimate=1.0)
+    obstacle_det = ObstacleDetector()
     seen = None
     while not stop.is_set():
         frame = frames.get(name)
@@ -651,6 +657,9 @@ def watch_pose(name, frames, poses, stats, stop):
             camera_params=(focal, focal, width / 2.0, height / 2.0),
             tag_size=1.0,
         )
+        obstacle = obstacle_det.update(gray, [t.corners for t in tags], time.time())
+        if obstacle is not None:
+            obstacles[name] = obstacle
         tag_map = load_map()
         world_best = None
         legacy = None
@@ -963,6 +972,7 @@ def main():
     motion = {}
     modes = {}
     estimates = {}
+    obstacles = {}
     takeoff_lock = threading.Lock()
     flight = {"stamp": time.time(), "go_names": set(), "slot": {}}
     ready = {}
@@ -986,13 +996,13 @@ def main():
                 target=run_drone,
                 args=(
                     name, iface, cmd, video, state, local_port, frames, poses, heights,
-                    batteries, motion, modes, estimates, stats, stop, takeoff_lock, flight, names, ready, play,
+                    batteries, motion, modes, estimates, stats, stop, takeoff_lock, flight, names, ready, play, obstacles,
                 ),
                 daemon=True,
             )
         )
         threads.append(
-            threading.Thread(target=watch_pose, args=(name, frames, poses, stats, stop), daemon=True)
+            threading.Thread(target=watch_pose, args=(name, frames, poses, stats, stop, obstacles), daemon=True)
         )
         threads.append(
             threading.Thread(target=log_track, args=(session, name, poses, ready, modes, heights, stop), daemon=True)

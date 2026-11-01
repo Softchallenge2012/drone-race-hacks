@@ -159,6 +159,34 @@ def track_rc(cam, yaw_err_deg, height_m, acquired, lane_m, land_dist, pids, dt):
     return (right, forward, 0, yaw), "track"
 
 
+# Obstacle level (1.0 = BRAKE_RATE in obstacles.py): swerve above AVOID_LEVEL,
+# stop forward motion above STOP_LEVEL. Readings older than OBSTACLE_MAX_AGE_S are ignored.
+AVOID_LEVEL = 0.6
+STOP_LEVEL = 1.0
+OBSTACLE_MAX_AGE_S = 0.5
+AVOID_RIGHT = 20
+AVOID_BACK = 10
+
+
+def avoid_rc(sticks, mode, obstacle, now):
+    """Override translation when an unmapped or moving obstacle is closing in.
+
+    Only active in translating modes. `side` is where the threat is in the frame
+    (-1 left, 0 center, 1 right): strafe away from it, and back off when it is
+    dead ahead or too close.
+    """
+    if mode not in ("lane", "track", "back") or not obstacle:
+        return sticks, mode
+    if now - obstacle["t"] > OBSTACLE_MAX_AGE_S or obstacle["level"] < AVOID_LEVEL:
+        return sticks, mode
+    _right, forward, _up, yaw = sticks
+    side = obstacle["side"]
+    away = -side if side else 1  # dead ahead: dodge right
+    if obstacle["level"] >= STOP_LEVEL:
+        return (away * AVOID_RIGHT, -AVOID_BACK if side == 0 else 0, 0, 0), "avoid"
+    return (away * AVOID_RIGHT, min(forward, 0), 0, yaw), "avoid"
+
+
 def predict_odom(pose_t, vel, dyaw_deg, dt):
     """Move the tag pose using the drone's own speed.
 
